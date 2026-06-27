@@ -163,6 +163,8 @@ export default function CalculateRRB({ examData }: { examData: any }) {
   const [zone, setZone]         = useState("");
   const [loading, setLoading]   = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [showHtmlInput, setShowHtmlInput] = useState(false);
+  const [htmlSource, setHtmlSource] = useState("");
   const router = useRouter();
 
   const brandColor = "lab(55 -44.44 -3.68 / 1)";
@@ -179,16 +181,56 @@ export default function CalculateRRB({ examData }: { examData: any }) {
 
   const handleClear = () => setInputUrl("");
 
+  const handlePasteHtml = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) { setHtmlSource(text); toast.success("HTML source pasted!"); }
+    } catch {
+      toast.error("Clipboard access denied. Please paste manually.");
+    }
+  };
+
+  const handleClearHtml = () => setHtmlSource("");
+
   // --- Main submit ---
   const handleCalculate = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!inputUrl.includes("http")) {
-      toast.error("Please paste a valid URL starting with http/https");
-      return;
-    }
     if (!zone) {
       toast.error("Please select your RRB Zone");
+      return;
+    }
+
+    if (showHtmlInput) {
+      if (htmlSource.trim().length < 500) {
+        toast.error("Please paste the complete HTML source code of the response page.");
+        return;
+      }
+      setLoading(true);
+      setStatusMsg("Calculating your score…");
+      try {
+        const computedData = parseRRBHtml(htmlSource, "MANUAL_HTML_UPLOAD", category, zone, examData.id);
+        setStatusMsg("Saving results…");
+        const response = await fetch("/api/calculate-rrb", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(computedData),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Failed to save result");
+
+        toast.success("Score Calculated Successfully!");
+        router.push(`/${examData.url}/result?roll=${data.dbData.rollNo}`);
+      } catch (err: any) {
+        setLoading(false);
+        setStatusMsg("");
+        toast.error(err.message || "Failed to parse HTML source. Make sure it's the correct page source.");
+      }
+      return;
+    }
+
+    if (!inputUrl.includes("http")) {
+      toast.error("Please paste a valid URL starting with http/https");
       return;
     }
 
@@ -212,34 +254,42 @@ export default function CalculateRRB({ examData }: { examData: any }) {
       const corsProxy   = `https://corsproxy.io/?url=${encodeURIComponent(inputUrl)}`;
 
       // Helper: try a URL, return text on success or null on failure
-      const tryFetch = async (proxyUrl: string): Promise<string | null> => {
+      const tryFetch = async (proxyUrl: string, name: string): Promise<string | null> => {
         try {
+          console.log(`[Fetch] Trying proxy ${name}: ${proxyUrl}`);
           const res = await fetch(proxyUrl, { cache: "no-store" });
-          if (!res.ok) return null;
+          console.log(`[Fetch] Proxy ${name} status: ${res.status}`);
+          if (!res.ok) {
+            const errText = await res.text().catch(() => "");
+            console.error(`[Fetch] Proxy ${name} failed:`, errText);
+            return null;
+          }
           const text = await res.text();
+          console.log(`[Fetch] Proxy ${name} success, length: ${text.length}`);
           // A valid RRB response sheet page always has substantial HTML
           return text.trim().length > 200 ? text : null;
-        } catch {
+        } catch (err: any) {
+          console.error(`[Fetch] Proxy ${name} error:`, err);
           return null;
         }
       };
 
-      setStatusMsg("Fetching your response sheet…");
-      html = (await tryFetch(cfProxy)) ?? "";
+      setStatusMsg("Fetching response sheet (Worker)…");
+      html = (await tryFetch(cfProxy, "Cloudflare Worker")) ?? "";
 
       if (!html) {
-        setStatusMsg("Trying alternate connection…");
-        html = (await tryFetch(serverProxy)) ?? "";
+        setStatusMsg("Trying alternate connection (Server)…");
+        html = (await tryFetch(serverProxy, "Server Proxy")) ?? "";
       }
 
       if (!html) {
-        setStatusMsg("Connecting via backup route…");
-        html = (await tryFetch(corsProxy)) ?? "";
+        setStatusMsg("Connecting via backup route (CORS Proxy)…");
+        html = (await tryFetch(corsProxy, "CORS Proxy")) ?? "";
       }
 
       if (!html) {
         throw new Error(
-          "Could not load your response sheet. Please make sure the URL is correct and not expired, then try again."
+          "Could not load response sheet. Check console logs for details, or try copying a fresh link from the RRB portal."
         );
       }
 
@@ -315,54 +365,106 @@ export default function CalculateRRB({ examData }: { examData: any }) {
         <CardContent className="p-6 md:p-8 space-y-6 bg-white">
           <form onSubmit={handleCalculate} className="space-y-6">
 
-            {/* 1. URL Input with Paste / Clear */}
-            <div>
-              <label className="block text-sm font-semibold text-zinc-800 mb-2 ml-1">
-                Response Sheet URL
-              </label>
-              <div className="relative flex items-center">
-                {/* Left icon */}
-                <div
-                  className="absolute left-3 pointer-events-none z-10"
-                  style={{ color: inputUrl ? brandColor : "#a1a1aa" }}
-                >
-                  <LinkIcon className="h-4 w-4" />
-                </div>
+            {/* URL/HTML Selector Toggle */}
+            <div className="flex justify-end -mb-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowHtmlInput(!showHtmlInput);
+                  // Clear error state or input variables
+                  setInputUrl("");
+                  setHtmlSource("");
+                }}
+                className="text-xs font-semibold text-zinc-500 hover:text-emerald-700 underline transition-all"
+              >
+                {showHtmlInput ? "← Use Response Sheet URL instead" : "Paste Page HTML manually fallback"}
+              </button>
+            </div>
 
-                <Input
-                  placeholder="Paste your RRB response sheet URL here…"
-                  value={inputUrl}
-                  onChange={(e) => setInputUrl(e.target.value)}
-                  className="brand-focus font-mono text-xs pl-10 pr-24 bg-zinc-50/50 border-zinc-200 text-zinc-900 placeholder:text-zinc-400 transition-all h-11 w-full rounded-lg"
-                  required
-                />
+            {/* 1. URL Input with Paste / Clear OR HTML Source Textarea */}
+            {!showHtmlInput ? (
+              <div>
+                <label className="block text-sm font-semibold text-zinc-800 mb-2 ml-1">
+                  Response Sheet URL
+                </label>
+                <div className="relative flex items-center">
+                  {/* Left icon */}
+                  <div
+                    className="absolute left-3 pointer-events-none z-10"
+                    style={{ color: inputUrl ? brandColor : "#a1a1aa" }}
+                  >
+                    <LinkIcon className="h-4 w-4" />
+                  </div>
 
-                {/* Right: Paste or Clear button */}
-                <div className="absolute right-1.5">
-                  {!inputUrl ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={handlePaste}
-                      className="h-8 px-3 text-xs font-semibold bg-white text-zinc-600 border border-zinc-200 hover:text-zinc-900 hover:bg-zinc-100 shadow-sm rounded-md transition-all flex items-center gap-1.5"
-                    >
-                      <ClipboardPaste className="h-3 w-3" />
-                      Paste
-                    </Button>
-                  ) : (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={handleClear}
-                      className="h-8 px-3 text-xs font-semibold bg-white text-zinc-500 border border-zinc-200 hover:text-red-600 hover:border-red-200 hover:bg-red-50 shadow-sm rounded-md transition-all flex items-center gap-1.5"
-                    >
-                      <X className="h-3 w-3" />
-                      Clear
-                    </Button>
-                  )}
+                  <Input
+                    placeholder="Paste your RRB response sheet URL here…"
+                    value={inputUrl}
+                    onChange={(e) => setInputUrl(e.target.value)}
+                    className="brand-focus font-mono text-xs pl-10 pr-24 bg-zinc-50/50 border-zinc-200 text-zinc-900 placeholder:text-zinc-400 transition-all h-11 w-full rounded-lg"
+                    required
+                  />
+
+                  {/* Right: Paste or Clear button */}
+                  <div className="absolute right-1.5">
+                    {!inputUrl ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={handlePaste}
+                        className="h-8 px-3 text-xs font-semibold bg-white text-zinc-600 border border-zinc-200 hover:text-zinc-900 hover:bg-zinc-100 shadow-sm rounded-md transition-all flex items-center gap-1.5"
+                      >
+                        <ClipboardPaste className="h-3 w-3" />
+                        Paste
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={handleClear}
+                        className="h-8 px-3 text-xs font-semibold bg-white text-zinc-500 border border-zinc-200 hover:text-red-600 hover:border-red-200 hover:bg-red-50 shadow-sm rounded-md transition-all flex items-center gap-1.5"
+                      >
+                        <X className="h-3 w-3" />
+                        Clear
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div>
+                <div className="flex justify-between items-center mb-2 ml-1">
+                  <label className="block text-sm font-semibold text-zinc-800">
+                    Response Sheet Page HTML Source
+                  </label>
+                  {!htmlSource ? (
+                    <button
+                      type="button"
+                      onClick={handlePasteHtml}
+                      className="text-xs font-bold text-zinc-600 hover:text-zinc-900 bg-zinc-100 px-2 py-1 rounded border border-zinc-200 flex items-center gap-1"
+                    >
+                      <ClipboardPaste className="h-3 w-3" /> Paste Code
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleClearHtml}
+                      className="text-xs font-bold text-zinc-500 hover:text-red-600 bg-zinc-100 px-2 py-1 rounded border border-zinc-200 flex items-center gap-1"
+                    >
+                      <X className="h-3 w-3" /> Clear Code
+                    </button>
+                  )}
+                </div>
+                
+                <textarea
+                  placeholder="How to copy HTML source:&#10;1. Open your response sheet URL&#10;2. Right click -> 'View page source' (or Ctrl+U / Cmd+U)&#10;3. Select all (Ctrl+A) and Copy&#10;4. Paste the raw code here"
+                  value={htmlSource}
+                  onChange={(e) => setHtmlSource(e.target.value)}
+                  rows={6}
+                  className="brand-focus font-mono text-xs p-3 bg-zinc-50/50 border border-zinc-200 text-zinc-900 placeholder:text-zinc-400 transition-all w-full rounded-lg resize-none outline-none"
+                  required
+                />
+              </div>
+            )}
 
             {/* 2. Zone */}
             <div>
