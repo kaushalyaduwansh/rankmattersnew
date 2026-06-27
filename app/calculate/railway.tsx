@@ -196,27 +196,28 @@ export default function CalculateRRB({ examData }: { examData: any }) {
     setStatusMsg("Fetching your response sheet…");
 
     try {
-      // STEP 1 — fetch HTML via proxy (server-to-server, bypasses CORS)
-      // --- 3-Tier Fetch Strategy (geo-restriction workaround) ---
+      // --- Fetch Strategy ---
       //
-      // Tier 1: Our server proxy (fast, works when server is in India)
-      // Tier 2: corsproxy.io — a Cloudflare Worker; when called from an Indian
-      //         browser it routes via Cloudflare's Indian PoP → RRB accepts it.
-      // Tier 3: allorigins.win — another CORS proxy as last resort.
+      // Tier 1: Your Cloudflare Worker (Indian PoP, sends correct Referer — most reliable)
+      // Tier 2: Our server proxy (fallback if Worker is down)
+      // Tier 3: corsproxy.io (last resort)
       //
       let html = "";
 
-      const serverProxy = `/api/proxy-html?url=${encodeURIComponent(inputUrl)}`;
-      const corsProxy1  = `https://corsproxy.io/?url=${encodeURIComponent(inputUrl)}`;
-      const corsProxy2  = `https://api.allorigins.win/raw?url=${encodeURIComponent(inputUrl)}`;
+      // Your own Cloudflare Worker URL
+      const CF_WORKER = "https://delicate-morning-9d02.kkbharti555.workers.dev/";
 
-      // Helper: try a URL and return text or null
-      const tryFetch = async (url: string): Promise<string | null> => {
+      const cfProxy     = `${CF_WORKER}?url=${encodeURIComponent(inputUrl)}`;
+      const serverProxy = `/api/proxy-html?url=${encodeURIComponent(inputUrl)}`;
+      const corsProxy   = `https://corsproxy.io/?url=${encodeURIComponent(inputUrl)}`;
+
+      // Helper: try a URL, return text on success or null on failure
+      const tryFetch = async (proxyUrl: string): Promise<string | null> => {
         try {
-          const res = await fetch(url, { cache: "no-store" });
+          const res = await fetch(proxyUrl, { cache: "no-store" });
           if (!res.ok) return null;
           const text = await res.text();
-          // Sanity check: a valid RRB page has at least some HTML
+          // A valid RRB response sheet page always has substantial HTML
           return text.trim().length > 200 ? text : null;
         } catch {
           return null;
@@ -224,16 +225,16 @@ export default function CalculateRRB({ examData }: { examData: any }) {
       };
 
       setStatusMsg("Fetching your response sheet…");
-      html = (await tryFetch(serverProxy)) ?? "";
+      html = (await tryFetch(cfProxy)) ?? "";
 
       if (!html) {
         setStatusMsg("Trying alternate connection…");
-        html = (await tryFetch(corsProxy1)) ?? "";
+        html = (await tryFetch(serverProxy)) ?? "";
       }
 
       if (!html) {
         setStatusMsg("Connecting via backup route…");
-        html = (await tryFetch(corsProxy2)) ?? "";
+        html = (await tryFetch(corsProxy)) ?? "";
       }
 
       if (!html) {
