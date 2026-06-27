@@ -197,13 +197,50 @@ export default function CalculateRRB({ examData }: { examData: any }) {
 
     try {
       // STEP 1 — fetch HTML via proxy (server-to-server, bypasses CORS)
-      const proxyUrl = `/api/proxy-html?url=${encodeURIComponent(inputUrl)}`;
-      const htmlResponse = await fetch(proxyUrl);
-      if (!htmlResponse.ok) {
-        const err = await htmlResponse.json().catch(() => ({}));
-        throw new Error(err.error || `HTTP ${htmlResponse.status}: Could not fetch response sheet.`);
+      // --- 3-Tier Fetch Strategy (geo-restriction workaround) ---
+      //
+      // Tier 1: Our server proxy (fast, works when server is in India)
+      // Tier 2: corsproxy.io — a Cloudflare Worker; when called from an Indian
+      //         browser it routes via Cloudflare's Indian PoP → RRB accepts it.
+      // Tier 3: allorigins.win — another CORS proxy as last resort.
+      //
+      let html = "";
+
+      const serverProxy = `/api/proxy-html?url=${encodeURIComponent(inputUrl)}`;
+      const corsProxy1  = `https://corsproxy.io/?url=${encodeURIComponent(inputUrl)}`;
+      const corsProxy2  = `https://api.allorigins.win/raw?url=${encodeURIComponent(inputUrl)}`;
+
+      // Helper: try a URL and return text or null
+      const tryFetch = async (url: string): Promise<string | null> => {
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          if (!res.ok) return null;
+          const text = await res.text();
+          // Sanity check: a valid RRB page has at least some HTML
+          return text.trim().length > 200 ? text : null;
+        } catch {
+          return null;
+        }
+      };
+
+      setStatusMsg("Fetching your response sheet…");
+      html = (await tryFetch(serverProxy)) ?? "";
+
+      if (!html) {
+        setStatusMsg("Trying alternate connection…");
+        html = (await tryFetch(corsProxy1)) ?? "";
       }
-      const html = await htmlResponse.text();
+
+      if (!html) {
+        setStatusMsg("Connecting via backup route…");
+        html = (await tryFetch(corsProxy2)) ?? "";
+      }
+
+      if (!html) {
+        throw new Error(
+          "Could not load your response sheet. Please make sure the URL is correct and not expired, then try again."
+        );
+      }
 
       // STEP 2 — parse + calculate on device
       setStatusMsg("Calculating your score…");
